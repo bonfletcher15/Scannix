@@ -1,0 +1,9 @@
+SSID,BSSID,SignalStrength,Encryption,Channel,Vendor
+LibraryFreeWiFi,8C:39:8C:C7:19:CE,-63,WPA2,160,TP-Link
+MallGuest,24:61:78:48:26:62,-72,WPA3,11,D-Link
+HomeWiFi,65:76:EA:EF:5D:DA,-63,WPA2,56,Netgear
+MallGuest,C6:ED:69:69:86:12,-37,WEP,80,Ubiquiti
+LibraryFreeWiFi,AE:49:3C:F5:86:8B,-72,WPA2,160,Apple
+MallGuest,7F:4D:7B:34:55:61,-65,WPA3,116,Netgear
+OfficeSecure,63:57:99:92:34:5E,-79,WPA3,128,Unknown
+LibraryFreeWiFi,18:1C:01:31:C3:EE,-87,WPA2,64,D-Link
