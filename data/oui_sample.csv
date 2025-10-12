@@ -1,6 +1,0 @@
-SSID,BSSID,SignalStrength,Encryption,Channel,Vendor
-CoffeeShopWiFi,00:11:22:33:44:55,-40,WPA2,6,Cisco
-LibraryFreeWiFi,66:77:88:99:AA:BB,-65,WEP,11,TP-Link
-OpenParkWiFi,CC:DD:EE:FF:00:11,-80,Open,1,Unknown
-OfficeSecure,22:33:44:55:66:77,-55,WPA3,36,Netgear
-HomeWiFi,88:99:AA:BB:CC:DD,-70,WPA2,6,D-Link
