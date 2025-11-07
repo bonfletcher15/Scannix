@@ -3,9 +3,7 @@ import pandas as pd
 from pywifi import PyWiFi, const
 import scorer
 import os
-import csv
 import requests
-from functools import lru_cache
 
 _vendor_cache = {}
 def lookup_vendor(bssid):
