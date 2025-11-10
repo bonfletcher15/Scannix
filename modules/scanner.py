@@ -4,8 +4,55 @@ from pywifi import PyWiFi, const
 import scorer
 import os
 import requests
-
+import traceback
 _vendor_cache = {}
+
+def is_SSID_Hidden(ssid):
+    if not ssid or ssid.strip() == "":
+        return "Hidden SSID"
+    return ssid
+
+def get_encryption(network):
+    if not getattr(network, "akm", None):
+        return "Open"
+    try:
+        if hasattr(const, "AKM_TYPE_WPA3PSK") and const.AKM_TYPE_WPA3PSK in network.akm:
+            return "WPA3"
+        elif const.AKM_TYPE_WPA2PSK in network.akm:
+            return "WPA2"
+        elif const.AKM_TYPE_WPAPSK in network.akm:
+            return "WPA"
+        else:
+            return "Other"
+    except Exception:
+        return "Other"
+
+def get_freq(network):
+    try:
+        f = int(network.freq)
+        if f > 100000:
+            f //= 1000
+    except Exception:
+        return None, None, None
+
+    if 2412 <= f <= 2472:
+        channel = (f - 2407) // 5
+    elif f == 2484:
+        channel = 14
+    elif 5000 <= f <= 6000:
+        channel = (f - 5000) // 5
+    else:
+        channel = None
+
+    if f < 3000:
+        band = "2.4GHz"
+    elif f < 6000:
+        band = "5GHz"
+    else:
+        band = "6GHz"
+
+    return f, band, channel
+
 def lookup_vendor(bssid):
     if not bssid or ":" not in bssid:
         return "Unknown"
@@ -27,66 +74,6 @@ def lookup_vendor(bssid):
     _vendor_cache[prefix] = vendor
     return vendor
 
-def normalize_freq_to_mhz(freq):
-    try:
-        f = int(freq)
-    except Exception:
-        return None
-    if f > 100000:
-        f = f // 1000
-    return f
-
-def freq_to_channel_mhz(mhz):
-    try:
-        f = int(mhz)
-    except Exception:
-        return None
-    if 2412 <= f <= 2472:
-        return (f - 2407) // 5
-    if f == 2484:
-        return 14
-    if 5000 <= f <= 6000:
-        return (f - 5000) // 5
-    return None
-
-def band_from_mhz(mhz):
-    try:
-        f = int(mhz)
-    except Exception:
-        return None
-    if f < 3000:
-        return "2.4GHz"
-    if f < 6000:
-        return "5GHz"
-    return "6GHz"
-
-def cipher_name_from_const(cipher_val):
-    try:
-        mapping = {}
-        for attr in dir(const):
-            if attr.startswith("CIPHER_"):
-                mapping[getattr(const, attr)] = attr.replace("CIPHER_", "")
-        if cipher_val in mapping:
-            return mapping[cipher_val]
-    except Exception:
-        pass
-
-    if cipher_val is None:
-        return None
-    try:
-        v = int(cipher_val)
-        if v == 0:
-            return "NONE"
-        if v == 1:
-            return "WEP"
-        if v == 2:
-            return "TKIP"
-        if v == 3:
-            return "CCMP"
-    except Exception:
-        pass
-    return str(cipher_val)
-
 def scan_networks():
     wifi = PyWiFi()
     iface = wifi.interfaces()[0]
@@ -96,29 +83,12 @@ def scan_networks():
 
     networks = []
     for network in results:
-        ssid = network.ssid
+
+        ssid = is_SSID_Hidden(network.ssid)
         bssid = network.bssid
         signal = network.signal
-        raw_freq = getattr(network, "freq", None)
-        mhz = normalize_freq_to_mhz(raw_freq)
-        channel = freq_to_channel_mhz(mhz) if mhz else None
-        band = band_from_mhz(mhz) if mhz else None
-        raw_cipher = getattr(network, "cipher", None)
-        cipher = cipher_name_from_const(raw_cipher)
-        encryption = "Open"
-        if getattr(network, "akm", None):
-            try:
-                if hasattr(const, "AKM_TYPE_WPA3PSK") and const.AKM_TYPE_WPA3PSK in network.akm:
-                    encryption = "WPA3"
-                elif const.AKM_TYPE_WPA2PSK in network.akm:
-                    encryption = "WPA2"
-                elif const.AKM_TYPE_WPAPSK in network.akm:
-                    encryption = "WPA"
-                else:
-                    encryption = "Other"
-            except Exception:
-                encryption = "Other"
-
+        encryption = get_encryption(network)  
+        mhz, band, channel = get_freq(network)
         vendor = lookup_vendor(bssid)
 
         networks.append({
@@ -126,21 +96,29 @@ def scan_networks():
             "BSSID": bssid,
             "SignalStrength": signal,
             "Encryption": encryption,
-            "Cipher": cipher,
             "Frequency": mhz,
             "Band": band,
             "Channel": channel,
-            "Vendor": vendor
+            "Vendor": vendor,        
         })
-
     return pd.DataFrame(networks)
 
 def run_scan():
-    df = scan_networks()
-    df = scorer.score_networks(df)
-    output_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../data/field_scan.csv"))
-    df.to_csv(output_path, index=False)
-    print(df.to_string(index=False))
+    try:
+        df = scan_networks()
+        output_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../data/field_scan.csv"))
+        df.to_csv(output_path, index=False)
+        print(df.to_string(index=False))
+
+    except Exception as e:
+        print("Scan failed:", e)
+        traceback.print_exc()
+
+    # Scorer
+    # df = scorer.score_networks(df)
+    # output_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../data/field_scan.csv"))
+    # df.to_csv(output_path, index=False)
+    # print(df.to_string(index=False))
 
 if __name__ == "__main__":
     run_scan()
