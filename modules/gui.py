@@ -2,10 +2,11 @@ import os
 import threading
 import time
 from datetime import datetime
-import pandas as pd
 import tkinter as tk
 from tkinter import ttk, messagebox
 import traceback
+
+import pandas as pd
 
 from scanner import scan_networks
 

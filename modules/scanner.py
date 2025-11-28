@@ -1,11 +1,14 @@
-import time
-import pandas as pd
-from pywifi import PyWiFi, const
 import os
-import requests
+import re
+import time
+import datetime
+import subprocess
 import traceback
-import subprocess, re
-import  datetime
+
+import pandas as pd
+import requests
+from pywifi import PyWiFi, const
+
 _vendor_cache = {}
 
 def is_SSID_Hidden(ssid):
