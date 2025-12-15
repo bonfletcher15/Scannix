@@ -28,7 +28,8 @@ class WiFiScannerGUI:
         self.interval_var = tk.StringVar(value="10")
         ttk.Entry(root, textvariable=self.interval_var, width=10).pack()
 
-        ttk.Button(root, text="Start", command=self.start_scanning).pack(pady=15)
+        ttk.Button(root, text="Start", command=self.start_scanning).pack(pady=10)
+        ttk.Button(root, text="Manage Whitelist", command=self.open_whitelist_manager).pack(pady=5)
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -72,7 +73,11 @@ class WiFiScannerGUI:
                 path = self.save_scan(df)
                 anomalies = detect_anomalies(df)
                 if anomalies:
-                    self.root.after(0, lambda: self.show_anomaly_popup(anomalies, path))
+                    # Show popups sequentially (one per anomaly type) with delay
+                    for i, anomaly in enumerate(anomalies):
+                        # Delay each popup by 500ms to prevent overlap
+                        delay = i * 500
+                        self.root.after(delay, lambda a=anomaly, p=path: self.show_anomaly_popup([a], p))
             except PermissionError:
                 messagebox.showerror(
                 "Permission Denied",
@@ -131,26 +136,124 @@ class WiFiScannerGUI:
             messagebox.showinfo("Stopped", "Scanning stopped.")
 
     def show_anomaly_popup(self, anomalies, file_path):
+        """
+        Show alert popup for anomaly/anomalies
+
+        Args:
+            anomalies: List containing ONE anomaly dict (for Phase 2)
+            file_path: Path to scan CSV file
+        """
+        if not anomalies:
+            return
+
+        anomaly = anomalies[0]  # Phase 2: one popup per anomaly type
+        anomaly_type = anomaly['type']
+
         win = tk.Toplevel(self.root)
-        win.title("Threat Alert")
-        win.geometry("450x320")
+        win.title(f"Threat Alert - {anomaly_type}")
+        win.geometry("500x400")
         win.resizable(False, False)
+        win.attributes("-topmost", True)
 
-        msg = "Anomalies detected:\n\n"
-        for a in anomalies:
-            count = len(a.get('details', []))
-            msg += f"• {a['type']} ({count} networks)\n"
+        # Severity indicator
+        severity = anomaly.get('severity', 'unknown').upper()
+        severity_colors = {
+            'CRITICAL': '#ff4444',
+            'HIGH': '#ff8800',
+            'MEDIUM': '#ffbb00',
+            'LOW': '#88ff88'
+        }
+        bg_color = severity_colors.get(severity, '#cccccc')
 
-            # Show device type breakdown if available
-            details = a.get('details')
-            if details is not None and 'DeviceType' in details.columns:
-                device_types = details['DeviceType'].value_counts()
-                type_str = ", ".join([f"{cnt} {dtype}" for dtype, cnt in device_types.items()])
-                msg += f"  Types: {type_str}\n"
-            msg += "\n"
+        # Header frame with severity
+        header_frame = tk.Frame(win, bg=bg_color, height=50)
+        header_frame.pack(fill='x')
+        tk.Label(
+            header_frame,
+            text=f"⚠️  {anomaly['type']}",
+            bg=bg_color,
+            font=("Arial", 14, "bold")
+        ).pack(pady=10)
 
-        tk.Label(win, text=msg, justify="left", font=("monospace", 10)).pack(pady=10)
+        # Details frame
+        details_frame = tk.Frame(win)
+        details_frame.pack(fill='both', expand=True, padx=20, pady=10)
 
+        details = anomaly.get('details')
+        count = len(details) if details is not None else 0
+
+        info_text = f"Found {count} network(s)\n\n"
+
+        # Device type breakdown
+        if details is not None and 'DeviceType' in details.columns:
+            device_types = details['DeviceType'].value_counts()
+            info_text += "Device Types:\n"
+            for dtype, cnt in device_types.items():
+                info_text += f"  • {dtype}: {cnt}\n"
+            info_text += "\n"
+
+        # Show first 5 networks
+        if details is not None:
+            info_text += "Networks:\n"
+            for _, row in details.head(5).iterrows():
+                ssid = str(row.get('SSID', 'Unknown'))[:30]
+                bssid = str(row.get('BSSID', 'Unknown'))
+                info_text += f"  • {ssid}\n    {bssid}\n"
+
+            if count > 5:
+                info_text += f"\n... and {count - 5} more (see CSV file)"
+
+        tk.Label(
+            details_frame,
+            text=info_text,
+            justify="left",
+            font=("monospace", 9)
+        ).pack(anchor='w')
+
+        # Button frame
+        button_frame = tk.Frame(win)
+        button_frame.pack(fill='x', padx=20, pady=15)
+
+        # Check if network is already whitelisted
+        from scanner import load_whitelist
+        whitelist = load_whitelist()
+        is_whitelisted = False
+
+        if details is not None and not details.empty:
+            if anomaly_type == "Evil Twin" or anomaly_type == "Trusted Network - New Device":
+                ssid = details['SSID'].iloc[0]
+                is_whitelisted = ssid in whitelist.get("trusted_networks", {})
+            elif anomaly_type == "Unencrypted Networks":
+                bssid = details['BSSID'].iloc[0].lower()
+                is_whitelisted = bssid in whitelist.get("trusted_open_networks", {})
+            elif anomaly_type == "Weak Encryption":
+                bssid = details['BSSID'].iloc[0].lower()
+                is_whitelisted = bssid in whitelist.get("trusted_weak_encryption", {})
+
+        # Trust/Untrust button
+        if is_whitelisted and anomaly_type != "Trusted Network - New Device":
+            # Show Untrust button for already whitelisted networks
+            trust_btn = tk.Button(
+                button_frame,
+                text="Untrust This Network",
+                command=lambda: self.untrust_network(anomaly, win),
+                bg='#ff6666',
+                fg='white',
+                font=("Arial", 10, "bold")
+            )
+        else:
+            # Show Trust button for non-whitelisted networks
+            trust_btn = tk.Button(
+                button_frame,
+                text="Trust This Network",
+                command=lambda: self.trust_network(anomaly, win),
+                bg='#4CAF50',
+                fg='white',
+                font=("Arial", 10, "bold")
+            )
+        trust_btn.pack(side='left', padx=5)
+
+        # Open file button
         def open_file():
             try:
                 if sys.platform.startswith("linux"):
@@ -162,8 +265,487 @@ class WiFiScannerGUI:
             except Exception as e:
                 messagebox.showerror("Error", str(e))
 
-        tk.Button(win, text="Open File", command=open_file).pack(side="left", padx=20, pady=20)
-        tk.Button(win, text="Close", command=win.destroy).pack(side="right", padx=20, pady=20)
+        tk.Button(
+            button_frame,
+            text="Open File",
+            command=open_file
+        ).pack(side='left', padx=5)
+
+        # Close button
+        tk.Button(
+            button_frame,
+            text="Close",
+            command=win.destroy
+        ).pack(side='right', padx=5)
+
+    def trust_network(self, anomaly, popup_window):
+        """
+        Handle "Trust This Network" button click
+
+        Args:
+            anomaly: Anomaly dict with 'type' and 'details'
+            popup_window: Tkinter window to close after trusting
+        """
+        anomaly_type = anomaly['type']
+        details = anomaly.get('details')
+
+        if details is None or details.empty:
+            messagebox.showerror("Error", "No network details available")
+            return
+
+        # Different handling per anomaly type
+        if anomaly_type == "Evil Twin":
+            self.trust_evil_twin(details, popup_window)
+        elif anomaly_type == "Unencrypted Networks":
+            self.trust_open_network(details, popup_window)
+        elif anomaly_type == "Weak Encryption":
+            self.trust_weak_encryption(details, popup_window)
+        elif anomaly_type == "Trusted Network - New Device":
+            self.trust_new_bssid(anomaly, popup_window)
+
+    def untrust_network(self, anomaly, popup_window):
+        """
+        Handle "Untrust This Network" button click
+
+        Args:
+            anomaly: Anomaly dict with 'type' and 'details'
+            popup_window: Tkinter window to close after untrusting
+        """
+        from scanner import load_whitelist, save_whitelist
+
+        anomaly_type = anomaly['type']
+        details = anomaly.get('details')
+
+        if details is None or details.empty:
+            messagebox.showerror("Error", "No network details available")
+            return
+
+        try:
+            whitelist = load_whitelist()
+
+            # Different handling per anomaly type
+            if anomaly_type == "Evil Twin":
+                ssid = details['SSID'].iloc[0]
+                confirm_msg = f"Remove network '{ssid}' from whitelist?\n\n"
+                confirm_msg += "Future scans will trigger Evil Twin alerts for this network."
+
+                # Bring window to front before showing dialog
+                popup_window.lift()
+                popup_window.focus_force()
+                response = messagebox.askyesno("Untrust Network", confirm_msg, parent=popup_window)
+
+                if response and ssid in whitelist["trusted_networks"]:
+                    del whitelist["trusted_networks"][ssid]
+                    save_whitelist(whitelist)
+                    messagebox.showinfo("Success", f"Network '{ssid}' removed from whitelist", parent=popup_window)
+                    popup_window.destroy()
+
+            elif anomaly_type == "Unencrypted Networks":
+                bssid = details['BSSID'].iloc[0].lower()
+                ssid = details['SSID'].iloc[0]
+                confirm_msg = f"Remove open network '{ssid}' ({bssid}) from whitelist?\n\n"
+                confirm_msg += "Future scans will trigger unencrypted network alerts."
+
+                popup_window.lift()
+                popup_window.focus_force()
+                response = messagebox.askyesno("Untrust Network", confirm_msg, parent=popup_window)
+
+                if response and bssid in whitelist["trusted_open_networks"]:
+                    del whitelist["trusted_open_networks"][bssid]
+                    save_whitelist(whitelist)
+                    messagebox.showinfo("Success", f"Network '{ssid}' removed from whitelist", parent=popup_window)
+                    popup_window.destroy()
+
+            elif anomaly_type == "Weak Encryption":
+                bssid = details['BSSID'].iloc[0].lower()
+                ssid = details['SSID'].iloc[0]
+                confirm_msg = f"Remove weak encryption network '{ssid}' ({bssid}) from whitelist?\n\n"
+                confirm_msg += "Future scans will trigger weak encryption alerts."
+
+                popup_window.lift()
+                popup_window.focus_force()
+                response = messagebox.askyesno("Untrust Network", confirm_msg, parent=popup_window)
+
+                if response and bssid in whitelist["trusted_weak_encryption"]:
+                    del whitelist["trusted_weak_encryption"][bssid]
+                    save_whitelist(whitelist)
+                    messagebox.showinfo("Success", f"Network '{ssid}' removed from whitelist", parent=popup_window)
+                    popup_window.destroy()
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to remove from whitelist: {e}", parent=popup_window)
+
+    def trust_evil_twin(self, details_df, popup_window):
+        """Trust an SSID with its current BSSIDs"""
+        from scanner import load_whitelist, save_whitelist
+
+        # Get SSID and all BSSIDs for this evil twin
+        ssid = details_df['SSID'].iloc[0]
+        bssids = details_df['BSSID'].tolist()
+        vendors = details_df['Vendor'].tolist()
+
+        # Build confirmation message
+        confirm_msg = f"Trust network '{ssid}'?\n\n"
+        confirm_msg += "This will whitelist the following BSSIDs:\n"
+        for bssid, vendor in zip(bssids, vendors):
+            confirm_msg += f"  • {bssid} ({vendor})\n"
+        confirm_msg += "\nFuture alerts will only trigger if NEW devices join this network.\n\n"
+        confirm_msg += "Are you sure?"
+
+        # Bring window to front before showing dialog
+        popup_window.lift()
+        popup_window.focus_force()
+        response = messagebox.askyesno("Trust Network", confirm_msg, parent=popup_window)
+
+        if not response:
+            return
+
+        try:
+            # Load current whitelist
+            whitelist = load_whitelist()
+
+            # Add or update trusted network
+            whitelist["trusted_networks"][ssid] = {
+                "allowed_bssids": [b.lower() for b in bssids],
+                "added_date": datetime.now().isoformat(),
+                "added_method": "user_trust_button",
+                "note": f"Trusted Evil Twin with {len(bssids)} BSSIDs"
+            }
+
+            # Save whitelist
+            save_whitelist(whitelist)
+
+            messagebox.showinfo("Success", f"Network '{ssid}' added to whitelist")
+            popup_window.destroy()
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save whitelist: {e}")
+
+    def trust_open_network(self, details_df, popup_window):
+        """Trust an unencrypted network (per-BSSID)"""
+        from scanner import load_whitelist, save_whitelist
+
+        # For simplicity, trust the first network (user can call multiple times for multiple networks)
+        row = details_df.iloc[0]
+        ssid = row['SSID']
+        bssid = row['BSSID'].lower()
+
+        confirm_msg = f"⚠️ WARNING ⚠️\n\n"
+        confirm_msg += f"Network '{ssid}' ({bssid}) has NO ENCRYPTION.\n\n"
+        confirm_msg += "All traffic on this network can be intercepted.\n\n"
+        confirm_msg += "Trust this network anyway?"
+
+        # Bring window to front before showing dialog
+        popup_window.lift()
+        popup_window.focus_force()
+        response = messagebox.askyesno("Trust Unencrypted Network", confirm_msg, parent=popup_window)
+
+        if not response:
+            return
+
+        try:
+            whitelist = load_whitelist()
+
+            whitelist["trusted_open_networks"][bssid] = {
+                "ssid": ssid,
+                "added_date": datetime.now().isoformat(),
+                "added_method": "user_trust_button",
+                "note": "User-trusted open network"
+            }
+
+            save_whitelist(whitelist)
+
+            messagebox.showinfo("Success", f"Open network '{ssid}' added to whitelist")
+            popup_window.destroy()
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save whitelist: {e}")
+
+    def trust_weak_encryption(self, details_df, popup_window):
+        """Trust a network with weak encryption (per-BSSID)"""
+        from scanner import load_whitelist, save_whitelist
+
+        row = details_df.iloc[0]
+        ssid = row['SSID']
+        bssid = row['BSSID'].lower()
+        encryption = row['Encryption']
+
+        confirm_msg = f"⚠️ WARNING ⚠️\n\n"
+        confirm_msg += f"Network '{ssid}' ({bssid}) uses weak {encryption} encryption.\n\n"
+        confirm_msg += "This encryption can be cracked. Recommend upgrading to WPA2/WPA3.\n\n"
+        confirm_msg += "Trust this network anyway?"
+
+        # Bring window to front before showing dialog
+        popup_window.lift()
+        popup_window.focus_force()
+        response = messagebox.askyesno("Trust Weak Encryption", confirm_msg, parent=popup_window)
+
+        if not response:
+            return
+
+        try:
+            whitelist = load_whitelist()
+
+            whitelist["trusted_weak_encryption"][bssid] = {
+                "ssid": ssid,
+                "encryption": encryption,
+                "added_date": datetime.now().isoformat(),
+                "added_method": "user_trust_button"
+            }
+
+            save_whitelist(whitelist)
+
+            messagebox.showinfo("Success", f"Weak encryption network '{ssid}' added to whitelist")
+            popup_window.destroy()
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save whitelist: {e}")
+
+    def trust_new_bssid(self, anomaly, popup_window):
+        """Add new BSSID to existing trusted network"""
+        from scanner import load_whitelist, save_whitelist
+
+        details_df = anomaly['details']
+        context = anomaly.get('context', {})
+
+        ssid = details_df['SSID'].iloc[0]
+        new_bssids = context.get('new_bssids', [])
+        known_bssids = context.get('known_bssids', [])
+
+        confirm_msg = f"Add new device(s) to trusted network '{ssid}'?\n\n"
+        confirm_msg += f"Known BSSIDs ({len(known_bssids)}):\n"
+        for bssid in known_bssids:
+            confirm_msg += f"  ✓ {bssid}\n"
+        confirm_msg += f"\nNew BSSIDs ({len(new_bssids)}):\n"
+        for bssid in new_bssids:
+            vendor = details_df[details_df['BSSID'].str.lower() == bssid]['Vendor'].iloc[0]
+            confirm_msg += f"  ⚠️ {bssid} ({vendor})\n"
+        confirm_msg += "\nOnly add if you recognize these devices!\n\nContinue?"
+
+        # Bring window to front before showing dialog
+        popup_window.lift()
+        popup_window.focus_force()
+        response = messagebox.askyesno("Add New Device to Trusted Network", confirm_msg, parent=popup_window)
+
+        if not response:
+            return
+
+        try:
+            whitelist = load_whitelist()
+
+            # Update existing trusted network
+            if ssid in whitelist["trusted_networks"]:
+                current_bssids = whitelist["trusted_networks"][ssid].get("allowed_bssids", [])
+                updated_bssids = list(set(current_bssids + new_bssids))
+                whitelist["trusted_networks"][ssid]["allowed_bssids"] = updated_bssids
+                whitelist["trusted_networks"][ssid]["last_updated"] = datetime.now().isoformat()
+
+            save_whitelist(whitelist)
+
+            messagebox.showinfo("Success", f"Added {len(new_bssids)} new device(s) to '{ssid}' whitelist")
+            popup_window.destroy()
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to update whitelist: {e}")
+
+    def open_whitelist_manager(self):
+        """Open whitelist management window"""
+        from scanner import load_whitelist
+
+        manager_win = tk.Toplevel(self.root)
+        manager_win.title("Scannix - Whitelist Manager")
+        manager_win.geometry("600x450")
+        manager_win.resizable(True, True)
+
+        # Load current whitelist
+        whitelist = load_whitelist()
+
+        # Header
+        header = tk.Frame(manager_win, bg='#2c3e50', height=50)
+        header.pack(fill='x')
+        tk.Label(
+            header,
+            text="Trusted Networks Whitelist",
+            bg='#2c3e50',
+            fg='white',
+            font=("Arial", 14, "bold")
+        ).pack(pady=10)
+
+        # Create notebook (tabbed interface)
+        notebook = ttk.Notebook(manager_win)
+        notebook.pack(fill='both', expand=True, padx=10, pady=10)
+
+        # Tab 1: Trusted Networks (Evil Twin exceptions)
+        trusted_frame = ttk.Frame(notebook)
+        notebook.add(trusted_frame, text=f"Evil Twin Exceptions ({len(whitelist.get('trusted_networks', {}))})")
+        self.build_whitelist_tab(trusted_frame, whitelist, "trusted_networks", manager_win)
+
+        # Tab 2: Open Networks
+        open_frame = ttk.Frame(notebook)
+        notebook.add(open_frame, text=f"Open Networks ({len(whitelist.get('trusted_open_networks', {}))})")
+        self.build_whitelist_tab(open_frame, whitelist, "trusted_open_networks", manager_win)
+
+        # Tab 3: Weak Encryption
+        weak_frame = ttk.Frame(notebook)
+        notebook.add(weak_frame, text=f"Weak Encryption ({len(whitelist.get('trusted_weak_encryption', {}))})")
+        self.build_whitelist_tab(weak_frame, whitelist, "trusted_weak_encryption", manager_win)
+
+        # Bottom buttons
+        button_frame = tk.Frame(manager_win)
+        button_frame.pack(fill='x', padx=10, pady=10)
+
+        tk.Button(
+            button_frame,
+            text="Refresh",
+            command=lambda: self.refresh_whitelist_manager(manager_win),
+            bg='#3498db',
+            fg='white',
+            font=("Arial", 10)
+        ).pack(side='left', padx=5)
+
+        tk.Button(
+            button_frame,
+            text="Close",
+            command=manager_win.destroy,
+            font=("Arial", 10)
+        ).pack(side='right', padx=5)
+
+    def build_whitelist_tab(self, parent, whitelist, category, manager_win):
+        """Build a whitelist category tab"""
+        # Scrollable frame
+        canvas = tk.Canvas(parent)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda _: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        # Display entries
+        entries = whitelist.get(category, {})
+
+        if not entries:
+            tk.Label(
+                scrollable_frame,
+                text="No entries in this category",
+                fg="gray",
+                font=("Arial", 11)
+            ).pack(pady=30)
+        else:
+            for key, data in entries.items():
+                self.create_whitelist_entry(scrollable_frame, key, data, whitelist, category, manager_win)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+    def create_whitelist_entry(self, parent, key, data, whitelist, category, manager_win):
+        """Create a single whitelist entry widget"""
+        from scanner import save_whitelist
+
+        frame = tk.LabelFrame(parent, text=key, padx=10, pady=5, font=("Arial", 10, "bold"))
+        frame.pack(fill='x', padx=10, pady=5)
+
+        # Display details based on category
+        if category == "trusted_networks":
+            # Evil Twin exception - show SSID and BSSIDs
+            bssids = data.get("allowed_bssids", [])
+            tk.Label(
+                frame,
+                text=f"SSID: {key}",
+                font=("Arial", 9, "bold")
+            ).pack(anchor='w', pady=2)
+            tk.Label(
+                frame,
+                text=f"Allowed BSSIDs ({len(bssids)}):",
+                font=("Arial", 9)
+            ).pack(anchor='w', pady=2)
+            for bssid in bssids:
+                tk.Label(
+                    frame,
+                    text=f"  • {bssid}",
+                    font=("monospace", 8)
+                ).pack(anchor='w')
+        else:
+            # Open/Weak - show BSSID and SSID
+            ssid = data.get("ssid", "Unknown")
+            tk.Label(
+                frame,
+                text=f"SSID: {ssid}",
+                font=("Arial", 9)
+            ).pack(anchor='w', pady=2)
+            tk.Label(
+                frame,
+                text=f"BSSID: {key}",
+                font=("monospace", 8)
+            ).pack(anchor='w', pady=2)
+            if "encryption" in data:
+                tk.Label(
+                    frame,
+                    text=f"Encryption: {data['encryption']}",
+                    font=("Arial", 8)
+                ).pack(anchor='w', pady=2)
+
+        # Metadata
+        added_date = data.get("added_date", "Unknown")
+        added_method = data.get("added_method", "Unknown")
+        tk.Label(
+            frame,
+            text=f"Added: {added_date[:10]} ({added_method})",
+            font=("Arial", 8),
+            fg="gray"
+        ).pack(anchor='w', pady=2)
+
+        if "note" in data:
+            tk.Label(
+                frame,
+                text=f"Note: {data['note']}",
+                font=("Arial", 8, "italic"),
+                fg="gray"
+            ).pack(anchor='w', pady=2)
+
+        # Remove button
+        def remove_entry():
+            category_names = {
+                "trusted_networks": "Evil Twin exception",
+                "trusted_open_networks": "open network",
+                "trusted_weak_encryption": "weak encryption network"
+            }
+            response = messagebox.askyesno(
+                "Confirm Remove",
+                f"Remove {category_names.get(category, 'entry')} '{key}' from whitelist?\n\n"
+                f"Future scans will trigger alerts for this network.",
+                parent=manager_win
+            )
+            if response:
+                try:
+                    del whitelist[category][key]
+                    save_whitelist(whitelist)
+                    messagebox.showinfo("Success", f"Removed '{key}' from whitelist", parent=manager_win)
+                    # Refresh the manager window
+                    self.refresh_whitelist_manager(manager_win)
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to remove: {e}", parent=manager_win)
+
+        tk.Button(
+            frame,
+            text="Remove",
+            command=remove_entry,
+            bg="#e74c3c",
+            fg="white",
+            font=("Arial", 9, "bold")
+        ).pack(anchor='e', pady=5)
+
+    def refresh_whitelist_manager(self, manager_win):
+        """Reload whitelist from file and refresh UI"""
+        import scanner
+        scanner._whitelist_cache = None  # Invalidate cache
+
+        manager_win.destroy()
+        self.open_whitelist_manager()
 
 if __name__ == "__main__":
     root = tk.Tk()

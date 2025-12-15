@@ -4,12 +4,14 @@ import time
 import datetime
 import subprocess
 import traceback
+import json
 
 import pandas as pd
 import requests
 from pywifi import PyWiFi, const
 
 _vendor_cache = {}
+_whitelist_cache = None
 
 def is_SSID_Hidden(ssid):
     if not ssid or not ssid.strip():
@@ -81,6 +83,93 @@ def rssi_to_quality(rssi_dbm):
         return None
     q = 2 * (rssi_dbm + 100)
     return max(0, min(100, int(q)))
+
+def load_whitelist():
+    """
+    Load whitelist configuration with caching
+
+    Returns:
+        dict: Whitelist data structure
+    """
+    global _whitelist_cache
+
+    if _whitelist_cache is not None:
+        return _whitelist_cache
+
+    whitelist_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "config", "whitelist.json")
+    )
+
+    # Default structure if file doesn't exist
+    default = {
+        "trusted_networks": {},
+        "trusted_open_networks": {},
+        "trusted_weak_encryption": {}
+    }
+
+    try:
+        if not os.path.exists(whitelist_path):
+            print(f"Warning: Whitelist file not found at {whitelist_path}")
+            print("Create config/whitelist.json to configure trusted networks")
+            _whitelist_cache = default
+            return default
+
+        with open(whitelist_path, 'r') as f:
+            data = json.load(f)
+
+            # Filter out comment/example entries (keys starting with _)
+            _whitelist_cache = {
+                "trusted_networks": {k: v for k, v in data.get("trusted_networks", {}).items() if not k.startswith("_")},
+                "trusted_open_networks": {k: v for k, v in data.get("trusted_open_networks", {}).items() if not k.startswith("_")},
+                "trusted_weak_encryption": {k: v for k, v in data.get("trusted_weak_encryption", {}).items() if not k.startswith("_")}
+            }
+
+            # Normalize BSSIDs to lowercase
+            for network_data in _whitelist_cache["trusted_networks"].values():
+                if "allowed_bssids" in network_data:
+                    network_data["allowed_bssids"] = [b.lower() for b in network_data["allowed_bssids"]]
+
+            return _whitelist_cache
+
+    except Exception as e:
+        print(f"Error loading whitelist: {e}")
+        traceback.print_exc()
+        _whitelist_cache = default
+        return default
+
+def save_whitelist(whitelist_data):
+    """
+    Save whitelist configuration to file
+
+    Args:
+        whitelist_data: dict containing whitelist structure
+    """
+    global _whitelist_cache
+
+    whitelist_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "config", "whitelist.json")
+    )
+
+    try:
+        os.makedirs(os.path.dirname(whitelist_path), exist_ok=True)
+
+        # Add metadata
+        output_data = {
+            "_comment": "Scannix Whitelist Configuration - Auto-managed via GUI or manual editing",
+            "_instructions": "Restart Scannix after manual edits to reload configuration",
+            **whitelist_data
+        }
+
+        with open(whitelist_path, 'w') as f:
+            json.dump(output_data, f, indent=2)
+
+        # Invalidate cache so next load reads from file
+        _whitelist_cache = None
+
+    except Exception as e:
+        print(f"Error saving whitelist: {e}")
+        traceback.print_exc()
+        raise
 
 def parse_iw_scan(iface):
     try:
@@ -181,29 +270,94 @@ def detect_device_type(ssid, vendor, bssid):
     return "Unknown"
 
 def detect_anomalies(df):
+    """
+    Detect network anomalies with whitelist filtering
+
+    Returns:
+        List of dicts with keys: 'type', 'details', 'severity'
+    """
     anomalies = []
+    whitelist = load_whitelist()
 
+    # === 1. Evil Twin Detection with Whitelist ===
     df_visible = df[df["SSID"] != "Hidden SSID"]
+
+    # Find SSIDs with multiple BSSIDs
     duplicate_ssids = df_visible[df_visible.duplicated("SSID", keep=False)]
+
     if not duplicate_ssids.empty:
-        anomalies.append({
-            "type": "Evil Twin",
-            "details": duplicate_ssids
-        })
+        # Check each SSID against whitelist
+        trusted_networks = whitelist.get("trusted_networks", {})
 
+        suspicious_networks = []
+
+        for ssid in duplicate_ssids['SSID'].unique():
+            ssid_df = duplicate_ssids[duplicate_ssids['SSID'] == ssid]
+            current_bssids = set(ssid_df['BSSID'].str.lower())
+
+            if ssid in trusted_networks:
+                # Check if any NEW BSSIDs appeared
+                allowed_bssids = set(trusted_networks[ssid].get('allowed_bssids', []))
+                new_bssids = current_bssids - allowed_bssids
+
+                if new_bssids:
+                    # NEW BSSID detected in trusted network!
+                    new_bssid_data = ssid_df[ssid_df['BSSID'].str.lower().isin(new_bssids)]
+
+                    anomalies.append({
+                        "type": "Trusted Network - New Device",
+                        "details": new_bssid_data[['SSID', 'BSSID', 'Encryption', 'Vendor', 'DeviceType', 'SignalQuality%']],
+                        "severity": "critical",
+                        "context": {
+                            "known_bssids": list(allowed_bssids),
+                            "new_bssids": list(new_bssids)
+                        }
+                    })
+            else:
+                # Not in whitelist - regular Evil Twin alert
+                suspicious_networks.append(ssid_df)
+
+        if suspicious_networks:
+            combined_df = pd.concat(suspicious_networks)
+            anomalies.append({
+                "type": "Evil Twin",
+                "details": combined_df[['SSID', 'BSSID', 'Encryption', 'Channel', 'Vendor', 'DeviceType', 'SignalQuality%']],
+                "severity": "critical"
+            })
+
+    # === 2. Unencrypted Networks with Whitelist ===
     open_nets = df[df["Encryption"].str.upper() == "OPEN"]
-    if not open_nets.empty:
-        anomalies.append({
-            "type": "Unencrypted Networks",
-            "details": open_nets
-        })
 
-    weak = df[df["Encryption"].str.contains("WEP|WPA$", case=False, regex=True)]
+    if not open_nets.empty:
+        trusted_open = whitelist.get("trusted_open_networks", {})
+        trusted_open_bssids = set(trusted_open.keys())
+
+        # Filter out whitelisted open networks
+        untrusted_open = open_nets[~open_nets["BSSID"].str.lower().isin(trusted_open_bssids)]
+
+        if not untrusted_open.empty:
+            anomalies.append({
+                "type": "Unencrypted Networks",
+                "details": untrusted_open[['SSID', 'BSSID', 'Vendor', 'DeviceType', 'SignalQuality%', 'Channel']],
+                "severity": "high"
+            })
+
+    # === 3. Weak Encryption with Whitelist ===
+    weak = df[df["Encryption"].str.contains("WEP|WPA$", case=False, regex=True, na=False)]
+
     if not weak.empty:
-        anomalies.append({
-            "type": "Weak Encryption",
-            "details": weak
-        })
+        trusted_weak = whitelist.get("trusted_weak_encryption", {})
+        trusted_weak_bssids = set(trusted_weak.keys())
+
+        # Filter out whitelisted weak encryption networks
+        untrusted_weak = weak[~weak["BSSID"].str.lower().isin(trusted_weak_bssids)]
+
+        if not untrusted_weak.empty:
+            anomalies.append({
+                "type": "Weak Encryption",
+                "details": untrusted_weak[['SSID', 'BSSID', 'Encryption', 'Vendor', 'DeviceType', 'SignalQuality%']],
+                "severity": "medium"
+            })
 
     return anomalies
 
