@@ -123,6 +123,63 @@ def estimate_distance_meters(rssi_dbm, freq_mhz, rssi_at_1m=-40.0, path_loss_exp
     d_m = 10 ** exponent
     return max(0.5, min(int(round(d_m)), 10000))
 
+def detect_device_type(ssid, vendor, bssid):
+    """
+    Detect if device is a router/AP or other hotspot type
+
+    Returns:
+        str: "Router", "Mobile Hotspot", "Portable Hotspot", or "Unknown"
+    """
+    ssid_lower = ssid.lower() if ssid else ""
+    vendor_lower = vendor.lower() if vendor and vendor != "Unknown" else ""
+
+    # Router indicators
+    router_vendors = [
+        "tp-link", "d-link", "cisco", "netgear", "asus", "linksys",
+        "ubiquiti", "mikrotik", "huawei", "zte", "tenda", "tplink"
+    ]
+    router_patterns = [
+        "router", "gateway", "-5g", "_5g", "cgates", "telia",
+        "movistar", "vodafone", "telekom"
+    ]
+
+    # Check vendor
+    for rv in router_vendors:
+        if rv in vendor_lower:
+            return "Router"
+
+    # Check SSID patterns
+    for pattern in router_patterns:
+        if pattern in ssid_lower:
+            return "Router"
+
+    # Mobile hotspot indicators
+    mobile_patterns = ["iphone", "android", "galaxy", "pixel", "oneplus", "xiaomi"]
+    mobile_vendors = ["apple", "samsung", "google", "xiaomi", "oppo", "vivo"]
+
+    for mp in mobile_patterns:
+        if mp in ssid_lower:
+            return "Mobile Hotspot"
+
+    for mv in mobile_vendors:
+        if mv in vendor_lower:
+            return "Mobile Hotspot"
+
+    # Portable router/gateway (4G dongles, travel routers)
+    if "4g-gateway" in ssid_lower or "portable" in ssid_lower or "mifi" in ssid_lower:
+        return "Portable Hotspot"
+
+    # Check for locally administered MAC (bit 1 of first octet)
+    # This often indicates virtual/hotspot interfaces
+    try:
+        first_octet = int(bssid.split(":")[0], 16)
+        if first_octet & 0x02:  # Bit 1 set = locally administered
+            return "Mobile Hotspot"
+    except:
+        pass
+
+    return "Unknown"
+
 def detect_anomalies(df):
     anomalies = []
 
@@ -176,6 +233,7 @@ def scan_networks():
         signal_dbm = extra.get("signal_dbm") if extra.get("signal_dbm") is not None else signal
         quality = rssi_to_quality(signal_dbm)
         est_dist = estimate_distance_meters(signal_dbm, mhz)
+        device_type = detect_device_type(ssid, vendor, bssid)
 
         networks.append({
             "SSID": ssid,
@@ -185,12 +243,45 @@ def scan_networks():
             "Frequency": mhz,
             "Band": band,
             "Channel": channel,
-            "Vendor": vendor,       
+            "Vendor": vendor,
             "Signal_dBm": signal_dbm,
             "SignalQuality%": quality,
-            "EstimatedDistance_m": round(est_dist)
+            "EstimatedDistance_m": round(est_dist),
+            "DeviceType": device_type
         })
     return pd.DataFrame(networks)
+
+def format_scan_summary(df):
+    """Format a concise scan summary for terminal display"""
+    if df.empty:
+        return "No networks detected"
+
+    total = len(df)
+    visible = len(df[df["SSID"] != "Hidden SSID"])
+    hidden = total - visible
+
+    encryption_counts = df["Encryption"].value_counts().to_dict()
+
+    summary = f"""
+╔══════════════════════════════════════════════════════╗
+║           SCAN SUMMARY - {total} Networks Found           ║
+╚══════════════════════════════════════════════════════╝
+
+Networks:  {visible} visible, {hidden} hidden
+Encryption: {encryption_counts.get('WPA2', 0)} WPA2, {encryption_counts.get('WPA3', 0)} WPA3, {encryption_counts.get('WPA', 0)} WPA, {encryption_counts.get('Open', 0)} Open
+
+Top Networks by Signal:
+"""
+
+    # Show top 5 strongest networks
+    top_df = df.nlargest(min(5, len(df)), 'SignalQuality%')[['SSID', 'BSSID', 'SignalQuality%', 'Encryption', 'Channel', 'Vendor']]
+
+    for _, row in top_df.iterrows():
+        ssid = str(row['SSID'])[:20] if len(str(row['SSID'])) > 20 else str(row['SSID'])
+        vendor = str(row['Vendor'])[:25] if len(str(row['Vendor'])) > 25 else str(row['Vendor'])
+        summary += f"  • {ssid:20} | {row['SignalQuality%']:3}% | {row['Encryption']:5} | Ch{row['Channel']:2} | {vendor}\n"
+
+    return summary
 
 def run_scan():
     try:

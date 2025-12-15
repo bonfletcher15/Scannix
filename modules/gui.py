@@ -42,10 +42,19 @@ class WiFiScannerGUI:
 
         try:
             interval = int(self.interval_var.get())
-            if interval <= 0:
-                raise ValueError
-        except ValueError:
-            messagebox.showerror("Invalid Input", "Please enter a valid positive integer.")
+            if interval < 3 or interval > 600:
+                raise ValueError("out_of_range")
+        except ValueError as e:
+            if str(e) == "out_of_range":
+                messagebox.showerror(
+                    "Invalid Input",
+                    "Scan interval must be between 3 and 600 seconds."
+                )
+            else:
+                messagebox.showerror(
+                    "Invalid Input",
+                    "Please enter a valid number."
+                )
             return
 
         self.scanning = True
@@ -90,7 +99,15 @@ class WiFiScannerGUI:
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         path = os.path.join(data_dir, f"{timestamp}.csv")
         df.to_csv(path, index=False)
-        print(f"Saved scan → {path}")
+
+        # Enhanced terminal output
+        from scanner import format_scan_summary
+        print("\n" + "="*60)
+        print(f"Scan saved: file://{os.path.abspath(path)}")
+        print("="*60)
+        print(format_scan_summary(df))
+        print(f"\nFull results: file://{os.path.abspath(path)}")
+        print("="*60 + "\n")
 
         return path
 
@@ -116,14 +133,23 @@ class WiFiScannerGUI:
     def show_anomaly_popup(self, anomalies, file_path):
         win = tk.Toplevel(self.root)
         win.title("Threat Alert")
-        win.geometry("350x240")
+        win.geometry("450x320")
         win.resizable(False, False)
 
         msg = "Anomalies detected:\n\n"
         for a in anomalies:
-            msg += f"• {a['type']}\n"
+            count = len(a.get('details', []))
+            msg += f"• {a['type']} ({count} networks)\n"
 
-        tk.Label(win, text=msg, justify="left").pack(pady=10)
+            # Show device type breakdown if available
+            details = a.get('details')
+            if details is not None and 'DeviceType' in details.columns:
+                device_types = details['DeviceType'].value_counts()
+                type_str = ", ".join([f"{cnt} {dtype}" for dtype, cnt in device_types.items()])
+                msg += f"  Types: {type_str}\n"
+            msg += "\n"
+
+        tk.Label(win, text=msg, justify="left", font=("monospace", 10)).pack(pady=10)
 
         def open_file():
             try:
