@@ -1,0 +1,7 @@
+{
+  "_comment": "Scannix Whitelist Configuration - Auto-managed via GUI or manual editing",
+  "_instructions": "Restart Scannix after manual edits to reload configuration",
+  "trusted_networks": {},
+  "trusted_open_networks": {},
+  "trusted_weak_encryption": {}
+}

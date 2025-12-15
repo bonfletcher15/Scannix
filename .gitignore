@@ -1,3 +1,4 @@
 data/*
 config/*
+!config/whitelist.json
 __pycache__/
