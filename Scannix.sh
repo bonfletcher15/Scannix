@@ -16,9 +16,15 @@ echo "[+] Installing dependencies..."
 "$VENV_PYTHON" -m pip install --quiet --upgrade pip
 "$VENV_PYTHON" -m pip install --quiet -r "$PROJECT_DIR/requirements.txt"
 
+DATA_DIR="$PROJECT_DIR/data"
+
 if [ "$EUID" -ne 0 ]; then
-    echo "[+] Restarting with administrator privileges..."
-    exec sudo "$VENV_PYTHON" "$GUI_SCRIPT"
+    exec sudo SUDO_USER="$USER" "$0"
+fi
+
+if [ -n "$SUDO_USER" ]; then
+    mkdir -p "$DATA_DIR"
+    chown -R "$SUDO_USER":"$SUDO_USER" "$DATA_DIR" 2>/dev/null || true
 fi
 
 exec "$VENV_PYTHON" "$GUI_SCRIPT"
