@@ -1,4 +1,5 @@
 import os
+import stat
 import threading
 import time
 from datetime import datetime
@@ -118,6 +119,12 @@ class WiFiScannerGUI:
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         path = os.path.join(data_dir, f"{timestamp}.csv")
         df.to_csv(path, index=False)
+
+        # Fix permissions on CSV file (readable/writable by all users)
+        try:
+            os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IWGRP | stat.S_IROTH | stat.S_IWOTH)
+        except Exception as e:
+            print(f"Warning: Could not set permissions on CSV file: {e}")
 
         from scanner import format_scan_summary
         print("\n" + "="*60)
