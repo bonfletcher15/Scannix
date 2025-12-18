@@ -120,7 +120,6 @@ class WiFiScannerGUI:
         path = os.path.join(data_dir, f"{timestamp}.csv")
         df.to_csv(path, index=False)
 
-        # Fix permissions on CSV file (readable/writable by all users)
         try:
             os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IWGRP | stat.S_IROTH | stat.S_IWOTH)
         except Exception as e:
